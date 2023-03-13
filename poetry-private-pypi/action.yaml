@@ -1,4 +1,4 @@
-name: poetry_auth_private_pypi
+name: poetry_private_pypi
 
 # Were we can define the inputs that our action will accept
 inputs:
