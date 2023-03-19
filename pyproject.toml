@@ -1,0 +1,9 @@
+[tool.ruff]
+ignore = ["E501"]
+extend-exclude = [
+  "__pycache__",
+  "docs",
+  "site",
+  ".nox",
+  ".notebooks"
+]

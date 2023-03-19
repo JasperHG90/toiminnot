@@ -5,19 +5,15 @@ inputs:
     repository_slug:
         description: "Name of the repository as added to poetry"
         required: true
-        type: string
     repository_url:
         description: 'Repository URL of the pypi repository'
         required: true
-        type: string
     user:
         description: "User name to authenticate with the private pypi repository"
         required: true
-        type: string
     password:
         description: "Password to authenticate with the private pypi repository"
         required: true
-        type: string
 
 runs:
   using: "composite"
