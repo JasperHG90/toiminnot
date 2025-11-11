@@ -1,0 +1,37 @@
+name: release
+description: "Template for releasing a Python package with Twine. Requires build artifacts to be uploaded in a previous step, e.g. using 'build' action."
+
+inputs:
+    python_version:
+        description: "Python version to use."
+        required: false
+        default: "3.11"
+
+runs:
+  using: "composite"
+
+  steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    # NB: requires build artifacts to be uploaded in a previous step
+    - name: Download build artifacts
+      uses: actions/download-artifact@v4
+      with:
+        name: dist
+        path: dist/
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python_version }}
+
+    - name: Install dependencies
+      run: |
+        pip install "twine~=6.1.0"
+      shell: bash
+
+    - name: Publish package to Google Artifact Registry
+      run: |
+        twine upload --verbose dist/*
+      shell: bash

@@ -1,0 +1,63 @@
+name: build
+description: "Template for building a Python package with UV and uploading it as an artifact to GitHub."
+
+inputs:
+    uv_version:
+        description: "uv version to use."
+        required: false
+        default: '0.7.x'
+    python_version:
+        description: "Python version to use."
+        required: false
+        default: "3.11"
+    package:
+        description: "The name of the package to build."
+        required: false
+    twine_version:
+        description: "The version of twine to install."
+        required: false
+        default: '6.1.0'
+
+runs:
+  using: "composite"
+
+  steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python_version }}
+
+    - name: Install UV
+      uses: astral-sh/setup-uv@v6
+      with:
+        version: ${{ inputs.uv_version }}
+        enable-cache: true
+
+    - name: Install dependencies
+      run: |
+        uv pip install --system --index https://pypi.org/simple "twine==${{ inputs.twine_version }}"
+      shell: bash
+
+    - name: Build package
+      run: |
+        if [ -n "${{ inputs.package }}" ]; then
+          uv build --package ${{ inputs.package }} --index https://pypi.org/simple
+        else
+          uv build --index https://pypi.org/simple
+        fi
+      shell: bash
+
+    - name: Check package
+      run: |
+        twine check dist/*
+      shell: bash
+
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v4
+      with:
+        name: dist${{ inputs.package && format('-{0}', inputs.package) || '' }}
+        path: dist/
+        retention-days: 7

@@ -1,0 +1,15 @@
+name: 'Git version'
+description: 'Retrieve version string based on git history and tags'
+inputs:
+  repo_path:
+    description: 'Repository path. Defaults to root repo.'
+    required: false
+    default: '.'
+outputs:
+  version:
+    description: 'Version string'
+runs:
+  using: 'docker'
+  image: 'Dockerfile'
+  args:
+    - ${{ inputs.repo_path }}
