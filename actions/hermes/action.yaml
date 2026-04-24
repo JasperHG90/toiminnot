@@ -1,0 +1,165 @@
+name: Hermes Agent
+description: Run Hermes Agent with a custom system prompt, skills directory, and provider. Defaults to ollama-cloud/glm-5.1.
+
+inputs:
+  system_prompt_file:
+    description: Path (relative to $GITHUB_WORKSPACE) to a Markdown file holding the agent's ephemeral system prompt.
+    required: true
+  user_message:
+    description: Message passed to the agent. Prefix with @ to load from a file (e.g. "@$RUNNER_TEMP/diff.patch").
+    required: true
+  api_key:
+    description: Provider API key. Wired into OPENAI_API_KEY and HERMES_RUNNER_API_KEY.
+    required: true
+  skills_dir:
+    description: Directory of skills (<name>/SKILL.md subdirs). Copied into $HERMES_HOME/skills/ before the run.
+    required: false
+    default: ''
+  model:
+    description: Model identifier. When base_url is set, Hermes passes this verbatim to the endpoint's /chat/completions (so do NOT include a provider prefix for Ollama Cloud — just the tag, e.g. "glm-5.1:cloud").
+    required: false
+    default: glm-5.1:cloud
+  provider:
+    description: Hermes inference provider identifier.
+    required: false
+    default: ollama-cloud
+  base_url:
+    description: OpenAI-compatible base URL for the provider.
+    required: false
+    default: https://ollama.com/v1
+  extra_env:
+    description: Multi-line KEY=VALUE pairs exported before the run. Escape hatch for provider-specific env vars.
+    required: false
+    default: ''
+  max_iterations:
+    description: Cap on Hermes tool-call iterations per conversation.
+    required: false
+    default: '40'
+  enabled_toolsets:
+    description: Comma-separated toolsets to whitelist (empty = Hermes default).
+    required: false
+    default: ''
+  disabled_toolsets:
+    description: Comma-separated toolsets to blacklist.
+    required: false
+    default: ''
+  output_file:
+    description: If set, the agent's final response is also written to this workspace-relative path.
+    required: false
+    default: ''
+  quiet_mode:
+    description: Pass quiet_mode=True to AIAgent. Set to 'false' to see iteration-by-iteration agent output in the step log.
+    required: false
+    default: 'true'
+  python_version:
+    description: Python version for setup-python.
+    required: false
+    default: '3.12'
+  uv_version:
+    description: Version spec for setup-uv.
+    required: false
+    default: 0.10.x
+
+outputs:
+  response:
+    description: Final agent response (truncated to ~900KB to stay under GitHub output limits).
+    value: ${{ steps.run.outputs.response }}
+  response_file:
+    description: Absolute path to the full response on disk.
+    value: ${{ steps.run.outputs.response_file }}
+  trajectory_file:
+    description: Absolute path to the JSON message trajectory on disk.
+    value: ${{ steps.run.outputs.trajectory_file }}
+
+runs:
+  using: composite
+  steps:
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: ${{ inputs.python_version }}
+
+    - name: Set up uv
+      uses: astral-sh/setup-uv@v5
+      with:
+        version: ${{ inputs.uv_version }}
+        enable-cache: true
+
+    - name: Prepare HERMES_HOME and copy skills
+      shell: bash
+      env:
+        INPUT_SKILLS_DIR: ${{ inputs.skills_dir }}
+      run: |
+        set -euo pipefail
+        hermes_home="$RUNNER_TEMP/hermes-home"
+        mkdir -p "$hermes_home/skills"
+        echo "HERMES_HOME=$hermes_home" >> "$GITHUB_ENV"
+        if [[ -n "$INPUT_SKILLS_DIR" ]]; then
+          src="$GITHUB_WORKSPACE/$INPUT_SKILLS_DIR"
+          if [[ ! -d "$src" ]]; then
+            echo "::error::skills_dir '$INPUT_SKILLS_DIR' does not exist under \$GITHUB_WORKSPACE"
+            exit 1
+          fi
+          shopt -s nullglob
+          for entry in "$src"/*/; do
+            cp -R "$entry" "$hermes_home/skills/"
+          done
+          echo "Copied $(find "$hermes_home/skills" -mindepth 1 -maxdepth 1 -type d | wc -l) skill(s) into \$HERMES_HOME/skills/"
+        fi
+
+    - name: Export extra_env
+      shell: bash
+      env:
+        EXTRA_ENV: ${{ inputs.extra_env }}
+      run: |
+        set -euo pipefail
+        if [[ -z "$EXTRA_ENV" ]]; then
+          exit 0
+        fi
+        while IFS= read -r line; do
+          [[ -z "$line" || "$line" == \#* ]] && continue
+          if [[ "$line" != *=* ]]; then
+            echo "::warning::extra_env line skipped (no '='): $line"
+            continue
+          fi
+          echo "$line" >> "$GITHUB_ENV"
+        done <<< "$EXTRA_ENV"
+
+    - name: Install runner
+      shell: bash
+      run: |
+        set -euo pipefail
+        uv sync --project "${{ github.action_path }}/runner"
+
+    - name: Run Hermes
+      id: run
+      shell: bash
+      env:
+        HERMES_RUNNER_MODEL: ${{ inputs.model }}
+        HERMES_RUNNER_PROVIDER: ${{ inputs.provider }}
+        HERMES_RUNNER_BASE_URL: ${{ inputs.base_url }}
+        HERMES_RUNNER_API_KEY: ${{ inputs.api_key }}
+        HERMES_RUNNER_SYSTEM_PROMPT_FILE: ${{ inputs.system_prompt_file }}
+        HERMES_RUNNER_USER_MESSAGE: ${{ inputs.user_message }}
+        HERMES_RUNNER_MAX_ITERATIONS: ${{ inputs.max_iterations }}
+        HERMES_RUNNER_ENABLED_TOOLSETS: ${{ inputs.enabled_toolsets }}
+        HERMES_RUNNER_DISABLED_TOOLSETS: ${{ inputs.disabled_toolsets }}
+        HERMES_RUNNER_OUTPUT_FILE: ${{ inputs.output_file }}
+        HERMES_RUNNER_QUIET_MODE: ${{ inputs.quiet_mode }}
+        HERMES_INFERENCE_PROVIDER: ${{ inputs.provider }}
+        HERMES_MODEL: ${{ inputs.model }}
+        OPENAI_BASE_URL: ${{ inputs.base_url }}
+        OPENAI_API_KEY: ${{ inputs.api_key }}
+      run: |
+        set -euo pipefail
+        uv run --project "${{ github.action_path }}/runner" python -m hermes_runner
+        response_file="$RUNNER_TEMP/hermes-response.txt"
+        trajectory_file="$RUNNER_TEMP/hermes-trajectory.json"
+        {
+          echo "response<<__HERMES_EOF__"
+          head -c 900000 "$response_file"
+          echo
+          echo "__HERMES_EOF__"
+        } >> "$GITHUB_OUTPUT"
+        echo "response_file=$response_file" >> "$GITHUB_OUTPUT"
+        echo "trajectory_file=$trajectory_file" >> "$GITHUB_OUTPUT"
