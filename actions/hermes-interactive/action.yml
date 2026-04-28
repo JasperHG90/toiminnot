@@ -1,0 +1,512 @@
+name: Hermes Interactive
+description: >-
+  Respond to @hermes mentions in GitHub issue/PR comments.
+  Gathers context (issue body, conversation history, PR diff), invokes the
+  base Hermes action, and posts the response back as a comment.
+
+inputs:
+  trigger-phrase:
+    description: The @-mention phrase that activates the action.
+    required: false
+    default: '@hermes'
+  system-prompt-file:
+    description: >-
+      Path to a custom system prompt. Absolute paths or paths relative to
+      $GITHUB_WORKSPACE are accepted. If empty, the built-in interactive
+      prompt is used.
+    required: false
+    default: ''
+  api-key:
+    description: Provider API key forwarded to the base Hermes action.
+    required: true
+  github-token:
+    description: GitHub token for reactions and comments.
+    required: true
+  model:
+    description: Model identifier passed to the base Hermes action.
+    required: false
+    default: glm-5.1:cloud
+  provider:
+    description: Hermes inference provider identifier.
+    required: false
+    default: ollama-cloud
+  base-url:
+    description: OpenAI-compatible base URL for the provider.
+    required: false
+    default: https://ollama.com/v1
+  skills-dir:
+    description: Directory of skills (<name>/SKILL.md subdirs).
+    required: false
+    default: ''
+  max-iterations:
+    description: Cap on Hermes tool-call iterations.
+    required: false
+    default: '20'
+  extra-env:
+    description: Multi-line KEY=VALUE pairs exported before the run.
+    required: false
+    default: ''
+  include-pr-diff:
+    description: Whether to include the PR diff in context (when triggered from a PR).
+    required: false
+    default: 'true'
+  include-comments:
+    description: Whether to include prior issue/PR comments in context.
+    required: false
+    default: 'true'
+  max-comment-count:
+    description: Maximum number of prior comments to include.
+    required: false
+    default: '20'
+  enabled-toolsets:
+    description: Comma-separated toolsets to whitelist (empty = Hermes default).
+    required: false
+    default: ''
+  disabled-toolsets:
+    description: Comma-separated toolsets to blacklist.
+    required: false
+    default: ''
+  quiet-mode:
+    description: Pass quiet_mode to the base action.
+    required: false
+    default: 'true'
+  push-changes:
+    description: >-
+      If 'true', detect workspace file changes after the agent runs.
+      When changes exist, create a branch, commit, and push. Set to
+      'pr' to also open a pull request.
+    required: false
+    default: 'false'
+  branch-prefix:
+    description: Prefix for branches created when push-changes is enabled.
+    required: false
+    default: 'hermes/'
+
+outputs:
+  response:
+    description: Final agent response text.
+    value: ${{ steps.hermes.outputs.response }}
+  response-file:
+    description: Absolute path to the full response on disk.
+    value: ${{ steps.hermes.outputs.response-file }}
+  comment-id:
+    description: ID of the posted GitHub comment.
+    value: ${{ steps.post.outputs.comment-id }}
+  branch:
+    description: Name of the branch created (empty if no changes or push-changes disabled).
+    value: ${{ steps.push.outputs.branch }}
+  pr-url:
+    description: URL of the created PR (empty if push-changes != 'pr').
+    value: ${{ steps.push.outputs.pr-url }}
+  skipped:
+    description: "'true' if the action determined it should not run."
+    value: ${{ steps.gate.outputs.skipped }}
+
+runs:
+  using: composite
+  steps:
+    # ── Step 1: Normalize event payload ──────────────────────────────────
+    #
+    # issue_comment payload:                .issue.number, .comment.*
+    # pull_request_review_comment payload:  .pull_request.number, .comment.*
+    #
+    # We normalise into outputs so every later step is event-type agnostic.
+    - name: Normalize event
+      id: event
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        comment_body=$(jq -r '.comment.body // ""' "$GITHUB_EVENT_PATH")
+        comment_id=$(jq -r '.comment.id' "$GITHUB_EVENT_PATH")
+        comment_user=$(jq -r '.comment.user.login // ""' "$GITHUB_EVENT_PATH")
+
+        # Determine issue/PR number (works for both event types)
+        number=$(jq -r '(.issue.number // .pull_request.number) // empty' "$GITHUB_EVENT_PATH")
+        if [[ -z "$number" ]]; then
+          echo "::error::Could not determine issue/PR number from event payload."
+          exit 1
+        fi
+
+        # Determine if this is a PR
+        # issue_comment on a PR: .issue.pull_request is non-null
+        # pull_request_review_comment: .pull_request is present
+        is_pr=$(jq -r '(.issue.pull_request != null) or (.pull_request != null)' "$GITHUB_EVENT_PATH")
+
+        # Determine the reaction API path.
+        # issue_comment  → /repos/{owner}/{repo}/issues/comments/{id}/reactions
+        # pr review comment → /repos/{owner}/{repo}/pulls/comments/{id}/reactions
+        if jq -e '.pull_request and (.issue | not)' "$GITHUB_EVENT_PATH" > /dev/null 2>&1; then
+          event_type="pull_request_review_comment"
+          reaction_path="repos/$GITHUB_REPOSITORY/pulls/comments/$comment_id/reactions"
+        else
+          event_type="issue_comment"
+          reaction_path="repos/$GITHUB_REPOSITORY/issues/comments/$comment_id/reactions"
+        fi
+
+        # For PR review comments, capture the file path and line for extra context
+        review_path=$(jq -r '.comment.path // ""' "$GITHUB_EVENT_PATH")
+        review_line=$(jq -r '.comment.line // .comment.original_line // ""' "$GITHUB_EVENT_PATH")
+
+        # Write body to file (printf avoids echo interpreting -n/-e flags)
+        printf '%s\n' "$comment_body" > "$RUNNER_TEMP/hermes-comment-body.txt"
+
+        echo "number=$number" >> "$GITHUB_OUTPUT"
+        echo "comment-id=$comment_id" >> "$GITHUB_OUTPUT"
+        echo "author=$comment_user" >> "$GITHUB_OUTPUT"
+        echo "is-pr=$is_pr" >> "$GITHUB_OUTPUT"
+        echo "event-type=$event_type" >> "$GITHUB_OUTPUT"
+        echo "reaction-path=$reaction_path" >> "$GITHUB_OUTPUT"
+        echo "review-path=$review_path" >> "$GITHUB_OUTPUT"
+        echo "review-line=$review_line" >> "$GITHUB_OUTPUT"
+        echo "body-file=$RUNNER_TEMP/hermes-comment-body.txt" >> "$GITHUB_OUTPUT"
+
+    # ── Step 2: Gate check ───────────────────────────────────────────────
+    - name: Gate check
+      id: gate
+      shell: bash
+      env:
+        TRIGGER_PHRASE: ${{ inputs.trigger-phrase }}
+        BODY_FILE: ${{ steps.event.outputs.body-file }}
+        COMMENT_USER: ${{ steps.event.outputs.author }}
+      run: |
+        set -euo pipefail
+
+        comment_body=$(cat "$BODY_FILE")
+
+        # Strip blockquoted lines to avoid re-triggering on quoted mentions
+        body_no_quotes=$(echo "$comment_body" | grep -v '^\s*>' || true)
+
+        # Case-insensitive fixed-string trigger check
+        if ! echo "$body_no_quotes" | grep -qiF "$TRIGGER_PHRASE"; then
+          echo "skipped=true" >> "$GITHUB_OUTPUT"
+          echo "::notice::Comment does not contain trigger phrase '$TRIGGER_PHRASE' (ignoring quoted lines)."
+          exit 0
+        fi
+
+        # Prevent bot loops
+        if [[ "$COMMENT_USER" == "github-actions[bot]" ]]; then
+          echo "skipped=true" >> "$GITHUB_OUTPUT"
+          echo "::notice::Ignoring comment from github-actions[bot]."
+          exit 0
+        fi
+
+        echo "skipped=false" >> "$GITHUB_OUTPUT"
+
+    # ── Step 3: Add eyes reaction ────────────────────────────────────────
+    - name: Add reaction
+      if: steps.gate.outputs.skipped != 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        REACTION_PATH: ${{ steps.event.outputs.reaction-path }}
+      run: |
+        gh api "$REACTION_PATH" -f content=eyes --silent || true
+
+    # ── Step 4: Extract prompt ───────────────────────────────────────────
+    - name: Extract prompt
+      id: prompt
+      if: steps.gate.outputs.skipped != 'true'
+      shell: bash
+      env:
+        BODY_FILE: ${{ steps.event.outputs.body-file }}
+        TRIGGER_PHRASE: ${{ inputs.trigger-phrase }}
+      run: |
+        set -euo pipefail
+        out="$RUNNER_TEMP/hermes-extracted-prompt.txt"
+
+        # Strip blockquoted lines and write to a clean file
+        grep -v '^\s*>' "$BODY_FILE" > "$RUNNER_TEMP/hermes-body-clean.txt" || true
+
+        # Use Python for robust multi-line extraction (handles multi-line
+        # prompts, trigger phrase mid-line, and case insensitivity).
+        BODY_CLEAN="$RUNNER_TEMP/hermes-body-clean.txt" \
+        OUT_PATH="$out" \
+        python3 <<'PYEOF'
+        import os, re, pathlib
+
+        trigger = os.environ["TRIGGER_PHRASE"]
+        body = pathlib.Path(os.environ["BODY_CLEAN"]).read_text()
+        out_path = os.environ["OUT_PATH"]
+
+        # Find the trigger phrase (case-insensitive) and take everything after it
+        pattern = re.compile(re.escape(trigger), re.IGNORECASE)
+        match = pattern.search(body)
+        if match:
+            prompt = body[match.end():].strip()
+        else:
+            prompt = ""
+
+        if not prompt:
+            prompt = (
+                "The user mentioned @hermes without a specific request. "
+                "Respond with a brief help message explaining how to use "
+                "@hermes (e.g., '@hermes <your question>')."
+            )
+
+        pathlib.Path(out_path).write_text(prompt)
+        PYEOF
+
+        echo "file=$out" >> "$GITHUB_OUTPUT"
+
+    # ── Step 5: Gather context ───────────────────────────────────────────
+    - name: Gather context
+      id: context
+      if: steps.gate.outputs.skipped != 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        NUMBER: ${{ steps.event.outputs.number }}
+        IS_PR: ${{ steps.event.outputs.is-pr }}
+        INCLUDE_DIFF: ${{ inputs.include-pr-diff }}
+        INCLUDE_COMMENTS: ${{ inputs.include-comments }}
+        MAX_COMMENTS: ${{ inputs.max-comment-count }}
+        REVIEW_PATH: ${{ steps.event.outputs.review-path }}
+        REVIEW_LINE: ${{ steps.event.outputs.review-line }}
+      run: |
+        set -euo pipefail
+        ctx="$RUNNER_TEMP/hermes-context.md"
+
+        # --- Metadata ---
+        if [[ "$IS_PR" == "true" ]]; then
+          gh pr view "$NUMBER" --json number,title,body,state,labels,author \
+            | jq -r '"# PR #\(.number): \(.title)\n\n**Author:** @\(.author.login)\n**State:** \(.state)\n**Labels:** \(if (.labels|length) > 0 then (.labels|map(.name)|join(", ")) else "none" end)\n\n## Description\n\(.body // "(empty)")"' \
+            > "$ctx"
+        else
+          gh issue view "$NUMBER" --json number,title,body,state,labels,author \
+            | jq -r '"# Issue #\(.number): \(.title)\n\n**Author:** @\(.author.login)\n**State:** \(.state)\n**Labels:** \(if (.labels|length) > 0 then (.labels|map(.name)|join(", ")) else "none" end)\n\n## Description\n\(.body // "(empty)")"' \
+            > "$ctx"
+        fi
+
+        # --- Review comment location (PR review comments only) ---
+        if [[ -n "$REVIEW_PATH" && "$REVIEW_PATH" != "null" ]]; then
+          printf '\n\n## Review comment location\n\n' >> "$ctx"
+          printf 'File: `%s`' "$REVIEW_PATH" >> "$ctx"
+          if [[ -n "$REVIEW_LINE" && "$REVIEW_LINE" != "null" ]]; then
+            printf ', Line: %s' "$REVIEW_LINE" >> "$ctx"
+          fi
+          printf '\n' >> "$ctx"
+        fi
+
+        # --- Conversation history ---
+        if [[ "$INCLUDE_COMMENTS" == "true" ]]; then
+          printf '\n\n## Conversation history\n\n' >> "$ctx"
+          gh api "repos/$GITHUB_REPOSITORY/issues/$NUMBER/comments?per_page=$MAX_COMMENTS" \
+            | jq -r '.[] | "### @\(.user.login) (\(.created_at))\n\(.body)\n"' \
+            >> "$ctx" || true
+        fi
+
+        # --- PR diff ---
+        if [[ "$IS_PR" == "true" && "$INCLUDE_DIFF" == "true" ]]; then
+          diff_file="$RUNNER_TEMP/hermes-pr-diff.patch"
+          gh pr diff "$NUMBER" > "$diff_file" 2>/dev/null || true
+          if [[ -s "$diff_file" ]]; then
+            printf '\n\n## PR Diff\n\n```diff\n' >> "$ctx"
+            head -c 50000 "$diff_file" >> "$ctx"
+            printf '\n```\n' >> "$ctx"
+            diff_bytes=$(wc -c < "$diff_file")
+            if [[ "$diff_bytes" -gt 50000 ]]; then
+              printf '\n*(diff truncated at 50KB — use tools to inspect specific files)*\n' >> "$ctx"
+            fi
+          fi
+        fi
+
+        echo "file=$ctx" >> "$GITHUB_OUTPUT"
+
+    # ── Step 6: Build user message ───────────────────────────────────────
+    - name: Build user message
+      id: message
+      if: steps.gate.outputs.skipped != 'true'
+      shell: bash
+      run: |
+        set -euo pipefail
+        msg="$RUNNER_TEMP/hermes-user-message.md"
+        {
+          echo '<context>'
+          cat "${{ steps.context.outputs.file }}"
+          echo '</context>'
+          echo
+          echo '<user-request>'
+          cat "${{ steps.prompt.outputs.file }}"
+          echo '</user-request>'
+        } > "$msg"
+        echo "file=$msg" >> "$GITHUB_OUTPUT"
+
+    # ── Step 7: Resolve system prompt ────────────────────────────────────
+    - name: Resolve system prompt
+      id: sysprompt
+      if: steps.gate.outputs.skipped != 'true'
+      shell: bash
+      env:
+        CUSTOM_PROMPT: ${{ inputs.system-prompt-file }}
+      run: |
+        set -euo pipefail
+        if [[ -n "$CUSTOM_PROMPT" ]]; then
+          # Accept absolute paths as-is; relative paths resolve from $GITHUB_WORKSPACE
+          if [[ "$CUSTOM_PROMPT" == /* ]]; then
+            resolved="$CUSTOM_PROMPT"
+          else
+            resolved="$GITHUB_WORKSPACE/$CUSTOM_PROMPT"
+          fi
+          if [[ ! -f "$resolved" ]]; then
+            echo "::error::system-prompt-file '$CUSTOM_PROMPT' not found (resolved to '$resolved')."
+            exit 1
+          fi
+          # Pass the absolute path so the base action's config.py can read it
+          echo "file=$resolved" >> "$GITHUB_OUTPUT"
+        else
+          # Use the built-in prompt shipped with this action
+          builtin="${{ github.action_path }}/prompts/interactive-system.md"
+          cp "$builtin" "$RUNNER_TEMP/hermes-interactive-system.md"
+          echo "file=$RUNNER_TEMP/hermes-interactive-system.md" >> "$GITHUB_OUTPUT"
+        fi
+
+    # ── Step 8: Invoke base Hermes action ────────────────────────────────
+    - name: Run Hermes
+      id: hermes
+      if: steps.gate.outputs.skipped != 'true'
+      uses: JasperHG90/toiminnot/actions/hermes@main
+      with:
+        system-prompt-file: ${{ steps.sysprompt.outputs.file }}
+        user-message: '@${{ steps.message.outputs.file }}'
+        api-key: ${{ inputs.api-key }}
+        model: ${{ inputs.model }}
+        provider: ${{ inputs.provider }}
+        base-url: ${{ inputs.base-url }}
+        skills-dir: ${{ inputs.skills-dir }}
+        max-iterations: ${{ inputs.max-iterations }}
+        extra-env: ${{ inputs.extra-env }}
+        enabled-toolsets: ${{ inputs.enabled-toolsets }}
+        disabled-toolsets: ${{ inputs.disabled-toolsets }}
+        quiet-mode: ${{ inputs.quiet-mode }}
+
+    # ── Step 9: Push changes (optional) ────────────────────────────────────
+    - name: Push changes
+      id: push
+      if: steps.gate.outputs.skipped != 'true' && inputs.push-changes != 'false'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        PUSH_MODE: ${{ inputs.push-changes }}
+        BRANCH_PREFIX: ${{ inputs.branch-prefix }}
+        NUMBER: ${{ steps.event.outputs.number }}
+        AUTHOR: ${{ steps.event.outputs.author }}
+      run: |
+        set -euo pipefail
+
+        # Check for uncommitted changes (tracked and untracked)
+        if git diff --quiet HEAD && [[ -z "$(git ls-files --others --exclude-standard)" ]]; then
+          echo "::notice::No workspace changes detected — skipping push."
+          echo "branch=" >> "$GITHUB_OUTPUT"
+          echo "pr-url=" >> "$GITHUB_OUTPUT"
+          exit 0
+        fi
+
+        # Create branch
+        timestamp=$(date +%s)
+        branch="${BRANCH_PREFIX}${NUMBER}-${timestamp}"
+        git checkout -b "$branch"
+
+        # Configure git identity
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+        # Stage all changes and commit
+        git add -A
+        commit_msg="hermes: apply changes from @${AUTHOR} request"
+        commit_msg="${commit_msg}"$'\n\n'"Triggered by @hermes mention on #${NUMBER}."
+        git commit -m "$commit_msg"
+
+        # Push
+        git push origin "$branch"
+        echo "branch=$branch" >> "$GITHUB_OUTPUT"
+
+        # Optionally create PR
+        if [[ "$PUSH_MODE" == "pr" ]]; then
+          comment_id=$(jq -r '.comment.id' "$GITHUB_EVENT_PATH")
+          pr_body="Automated changes applied by Hermes in response to "
+          pr_body+="[this comment](https://github.com/$GITHUB_REPOSITORY/issues/${NUMBER}#issuecomment-${comment_id})."
+          pr_body+=$'\n\n'"Triggered by @${AUTHOR}."
+          default_branch=$(gh repo view --json defaultBranchRef -q .defaultBranchRef.name)
+          pr_url=$(gh pr create \
+            --title "hermes: changes for #${NUMBER}" \
+            --body "$pr_body" \
+            --head "$branch" \
+            --base "$default_branch")
+          echo "pr-url=$pr_url" >> "$GITHUB_OUTPUT"
+        else
+          echo "pr-url=" >> "$GITHUB_OUTPUT"
+        fi
+
+    # ── Step 10: Post response ───────────────────────────────────────────
+    - name: Post response
+      id: post
+      if: steps.gate.outputs.skipped != 'true'
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        RESPONSE_FILE: ${{ steps.hermes.outputs.response-file }}
+        AUTHOR: ${{ steps.event.outputs.author }}
+        NUMBER: ${{ steps.event.outputs.number }}
+        PUSHED_BRANCH: ${{ steps.push.outputs.branch }}
+        PR_URL: ${{ steps.push.outputs.pr-url }}
+      run: |
+        set -euo pipefail
+
+        if [[ ! -f "$RESPONSE_FILE" ]]; then
+          echo "::error::Hermes produced no response file."
+          exit 1
+        fi
+
+        # Build comment body with header
+        comment_file="$RUNNER_TEMP/hermes-comment.md"
+        {
+          echo "**Hermes** replied to @${AUTHOR}:"
+          echo
+          echo "---"
+          echo
+          # Truncate at GitHub's 65535-char limit (minus header overhead)
+          head -c 62000 "$RESPONSE_FILE"
+          resp_bytes=$(wc -c < "$RESPONSE_FILE")
+          if [[ "$resp_bytes" -gt 62000 ]]; then
+            echo
+            echo
+            echo "*(response truncated — full output available in workflow artifacts)*"
+          fi
+
+          # Append push/PR info if changes were pushed
+          if [[ -n "$PUSHED_BRANCH" ]]; then
+            echo
+            echo "---"
+            echo
+            if [[ -n "$PR_URL" ]]; then
+              echo "**Changes pushed** and PR created: $PR_URL"
+            else
+              echo "**Changes pushed** to branch \`$PUSHED_BRANCH\`"
+            fi
+          fi
+        } > "$comment_file"
+
+        # Post comment (gh issue comment works for both issues and PRs)
+        comment_url=$(gh issue comment "$NUMBER" -F "$comment_file")
+
+        # Extract comment ID from the returned URL
+        # URL format: https://github.com/{owner}/{repo}/issues/{n}#issuecomment-{id}
+        comment_id=$(echo "$comment_url" | grep -o 'issuecomment-[0-9]*' | sed 's/issuecomment-//' || true)
+        echo "comment-id=${comment_id}" >> "$GITHUB_OUTPUT"
+
+    # ── Step 11: Update reaction ─────────────────────────────────────────
+    - name: Update reaction
+      if: steps.gate.outputs.skipped != 'true' && always()
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github-token }}
+        REACTION_PATH: ${{ steps.event.outputs.reaction-path }}
+        HERMES_STATUS: ${{ steps.hermes.outcome }}
+      run: |
+        if [[ "$HERMES_STATUS" == "success" ]]; then
+          reaction="rocket"
+        else
+          reaction="confused"
+        fi
+        gh api "$REACTION_PATH" -f content="$reaction" --silent || true
