@@ -53,42 +53,43 @@ jobs:
 
       - uses: JasperHG90/toiminnot/actions/hermes-interactive@main
         with:
-          api-key: ${{ secrets.OLLAMA_API_KEY }}
-          github-token: ${{ github.token }}
+          api_key: ${{ secrets.OLLAMA_API_KEY }}
+          github_token: ${{ github.token }}
 ```
 
 ## Inputs
 
 | Input | Required | Default | Description |
 |-------|----------|---------|-------------|
-| `trigger-phrase` | no | `@hermes` | The @-mention phrase that activates the action |
-| `system-prompt-file` | no | `''` | Path to custom system prompt (absolute or relative to `$GITHUB_WORKSPACE`). Falls back to built-in prompt if empty |
-| `api-key` | **yes** | — | Provider API key |
-| `github-token` | **yes** | — | GitHub token for reactions and comments |
+| `trigger_phrase` | no | `@hermes` | The @-mention phrase that activates the action |
+| `system_prompt_file` | no | `''` | Path to custom system prompt (absolute or relative to `$GITHUB_WORKSPACE`). Falls back to built-in prompt if empty |
+| `api_key` | **yes** | — | Provider API key |
+| `github_token` | **yes** | — | GitHub token for reactions and comments |
 | `model` | no | `glm-5.1:cloud` | Model identifier |
 | `provider` | no | `ollama-cloud` | Hermes inference provider |
-| `base-url` | no | `https://ollama.com/v1` | OpenAI-compatible base URL |
-| `skills-dir` | no | `''` | Skills directory (`<name>/SKILL.md` subdirs) |
-| `max-iterations` | no | `20` | Tool-call iteration cap |
-| `extra-env` | no | `''` | Multi-line `KEY=VALUE` pairs exported before the run |
-| `include-pr-diff` | no | `'true'` | Include PR diff in context |
-| `include-comments` | no | `'true'` | Include prior comments in context |
-| `max-comment-count` | no | `'20'` | Max prior comments to include |
-| `enabled-toolsets` | no | `''` | Comma-separated toolsets to whitelist |
-| `disabled-toolsets` | no | `''` | Comma-separated toolsets to blacklist |
-| `quiet-mode` | no | `'true'` | Suppress per-iteration agent output in logs |
-| `push-changes` | no | `'false'` | `'true'` to push workspace changes to a branch; `'pr'` to also create a PR |
-| `branch-prefix` | no | `'hermes/'` | Prefix for branches created when push-changes is enabled |
+| `base_url` | no | `https://ollama.com/v1` | OpenAI-compatible base URL |
+| `skills_dir` | no | `''` | Skills directory (`<name>/SKILL.md` subdirs) |
+| `max_iterations` | no | `20` | Tool-call iteration cap |
+| `extra_env` | no | `''` | Multi-line `KEY=VALUE` pairs exported before the run |
+| `include_pr_diff` | no | `'true'` | Include PR diff in context |
+| `include_comments` | no | `'true'` | Include prior comments in context |
+| `max_comment_count` | no | `'20'` | Max prior comments to include |
+| `enabled_toolsets` | no | `''` | Comma-separated toolsets to whitelist |
+| `disabled_toolsets` | no | `''` | Comma-separated toolsets to blacklist |
+| `quiet_mode` | no | `'true'` | Suppress per-iteration agent output in logs |
+| `push_changes` | no | `'false'` | `'true'` to push workspace changes to a branch; `'pr'` to also create a PR |
+| `branch_prefix` | no | `'hermes/'` | Prefix for branches created when push_changes is enabled |
+| `uv_version` | no | `0.10.x` | Version spec for `setup-uv`, passed to the base Hermes action |
 
 ## Outputs
 
 | Output | Description |
 |--------|-------------|
 | `response` | Final agent response text |
-| `response-file` | Absolute path to the full response file |
-| `comment-id` | ID of the posted GitHub comment |
+| `response_file` | Absolute path to the full response file |
+| `comment_id` | ID of the posted GitHub comment |
 | `branch` | Branch name if changes were pushed (empty otherwise) |
-| `pr-url` | URL of the created PR if `push-changes: 'pr'` (empty otherwise) |
+| `pr_url` | URL of the created PR if `push_changes: 'pr'` (empty otherwise) |
 | `skipped` | `'true'` if the action decided not to run (wrong trigger, bot comment) |
 
 ## Supported triggers
@@ -106,8 +107,8 @@ The action automatically gathers context for the agent:
 
 1. **Issue/PR metadata** — title, body, labels, author, state
 2. **Review comment location** — file path and line number (PR review comments only)
-3. **Conversation history** — up to `max-comment-count` prior comments (disable with `include-comments: 'false'`)
-4. **PR diff** — when triggered from a PR comment, includes the diff truncated to 50KB (disable with `include-pr-diff: 'false'`)
+3. **Conversation history** — up to `max_comment_count` prior comments (disable with `include_comments: 'false'`)
+4. **PR diff** — when triggered from a PR comment, includes the diff truncated to 50KB (disable with `include_pr_diff: 'false'`)
 
 ## Security
 
@@ -123,9 +124,9 @@ Override the built-in prompt by pointing to your own:
 ```yaml
 - uses: JasperHG90/toiminnot/actions/hermes-interactive@main
   with:
-    api-key: ${{ secrets.OLLAMA_API_KEY }}
-    github-token: ${{ github.token }}
-    system-prompt-file: .github/prompts/my-hermes-system.md
+    api_key: ${{ secrets.OLLAMA_API_KEY }}
+    github_token: ${{ github.token }}
+    system_prompt_file: .github/prompts/my-hermes-system.md
 ```
 
 ## Trigger phrase
@@ -135,9 +136,9 @@ Change the trigger phrase to avoid conflicts with other bots:
 ```yaml
 - uses: JasperHG90/toiminnot/actions/hermes-interactive@main
   with:
-    trigger-phrase: '@mybot'
-    api-key: ${{ secrets.API_KEY }}
-    github-token: ${{ github.token }}
+    trigger_phrase: '@mybot'
+    api_key: ${{ secrets.API_KEY }}
+    github_token: ${{ github.token }}
 ```
 
 ## Pushing changes
@@ -147,12 +148,12 @@ If the agent modifies files during its run, you can have the action commit and p
 ```yaml
 - uses: JasperHG90/toiminnot/actions/hermes-interactive@main
   with:
-    api-key: ${{ secrets.OLLAMA_API_KEY }}
-    github-token: ${{ github.token }}
-    push-changes: 'pr'  # 'true' = push branch only, 'pr' = push + open PR
+    api_key: ${{ secrets.OLLAMA_API_KEY }}
+    github_token: ${{ github.token }}
+    push_changes: 'pr'  # 'true' = push branch only, 'pr' = push + open PR
 ```
 
-When `push-changes` is enabled:
+When `push_changes` is enabled:
 - The action checks for workspace changes after the agent finishes
 - If changes exist: creates a `hermes/{number}-{timestamp}` branch, commits, and pushes
 - With `'pr'`: also opens a pull request targeting the default branch
