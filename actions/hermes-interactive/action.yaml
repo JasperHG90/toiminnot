@@ -81,6 +81,10 @@ inputs:
     description: Prefix for branches created when push_changes is enabled.
     required: false
     default: 'hermes/'
+  uv_version:
+    description: Version spec for setup-uv, passed to the base Hermes action.
+    required: false
+    default: 0.10.x
 
 outputs:
   response:
@@ -365,7 +369,9 @@ runs:
     - name: Run Hermes
       id: hermes
       if: steps.gate.outputs.skipped != 'true'
-      uses: JasperHG90/toiminnot/actions/hermes@main
+      # Pinned so a tag of this action fixes the code that runs. Bump it with
+      # each hermes release.
+      uses: JasperHG90/toiminnot/actions/hermes@551e8a6cbb23aba74045fa3578bf4c14ffb92893 # v1.2.0
       with:
         system_prompt_file: ${{ steps.sysprompt.outputs.file }}
         user_message: '@${{ steps.message.outputs.file }}'
@@ -379,6 +385,7 @@ runs:
         enabled_toolsets: ${{ inputs.enabled_toolsets }}
         disabled_toolsets: ${{ inputs.disabled_toolsets }}
         quiet_mode: ${{ inputs.quiet_mode }}
+        uv_version: ${{ inputs.uv_version }}
 
     # ── Step 9: Push changes (optional) ────────────────────────────────────
     - name: Push changes
