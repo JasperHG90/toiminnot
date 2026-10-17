@@ -3,7 +3,7 @@
 **Description:** Template for running prek checks.
 **Inputs:**
 - `python_version`: Python version to use (default: "3.11").
-- `prek_version`: Prek version to use (default: "4.2.0").
+- `prek_version`: Prek version to use (default: "0.2.25").
 - `directory`: Path to directory on which to run prek (default: ".").
 
 **Example Usage:**

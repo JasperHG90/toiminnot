@@ -5,7 +5,7 @@
 - `directory`: Path to tests (required).
 - `uv_version`: uv version to use (required).
 - `python_version`: Python version to use (default: "3.11").
-- `markers`: Pytest markers to use (default: "").
+- `markers`: Pytest marker expression, passed as `-m` (default: "", which passes no `-m`, so the `-m` in your pytest `addopts` applies).
 
 **Example Usage:**
 ```yaml

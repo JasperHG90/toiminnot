@@ -37,6 +37,16 @@ runs:
         uv sync --all-extras --all-groups
       shell: bash
     - name: run tests
+      env:
+        TESTS_DIRECTORY: ${{ inputs.directory }}
+        TESTS_MARKERS: ${{ inputs.markers }}
       run: |
-        uv run pytest "${{ inputs.directory }}" -v -m "${{ inputs.markers }}" --color=yes --tb=short
+        set -euo pipefail
+        # An empty -m clears the project's own marker filter (addopts), so
+        # pass -m only when the caller sets markers.
+        args=("$TESTS_DIRECTORY" -v --color=yes --tb=short)
+        if [ -n "$TESTS_MARKERS" ]; then
+          args+=(-m "$TESTS_MARKERS")
+        fi
+        uv run pytest "${args[@]}"
       shell: bash
